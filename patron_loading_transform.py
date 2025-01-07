@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
+import csv  # Import csv so we can reference csv.QUOTE_NONE
 from io import StringIO
 
 def transform_data_with_patron_notes(raw_data):
     transformed = pd.DataFrame()
 
-    # Define required columns
+    # Define required columns (from your CSV)
     required_columns = [
         'First Name', 'Middle Name', 'Last Name', 'Nickname', 'Student Number',
         'Email', 'Course Type', 'Student Home Institution Abbrev',
@@ -14,13 +15,13 @@ def transform_data_with_patron_notes(raw_data):
         'Student Home Institution Name'
     ]
 
-    # Check for missing columns
+    # Check for missing columns in the uploaded CSV
     missing_columns = [col for col in required_columns if col not in raw_data.columns]
     if missing_columns:
         st.error(f"The following required columns are missing in the uploaded CSV: {', '.join(missing_columns)}")
         st.stop()
 
-    # Static fields
+    # Create the columns for the final output
     transformed['prefix'] = ''
     transformed['givenName'] = raw_data['First Name'].fillna('')
     transformed['middleName'] = raw_data['Middle Name'].fillna('')
@@ -34,14 +35,14 @@ def transform_data_with_patron_notes(raw_data):
     transformed['barcode'] = raw_data['Student Number'].fillna('')
     transformed['idAtSource'] = raw_data['Email'].fillna('')
     transformed['sourceSystem'] = 'https://idp.divinity.edu.au/realms/divinity'
-    
+
     # Borrower Category Mapping
     transformed['borrowerCategory'] = raw_data['Course Type'].apply(
         lambda x: 'HDR Student' if isinstance(x, str) and x.strip().upper() == 'RESEARCH' else 'Student'
     )
 
     transformed['circRegistrationDate'] = ''
-    transformed['oclcExpirationDate'] = '2025-12-31T00:00:00'  # Ensuring it's a string
+    transformed['oclcExpirationDate'] = '2025-12-31T00:00:00'  # Example static date, ensure it's a string
 
     # Home Branch Mapping
     home_branch_mapping = {
@@ -74,10 +75,8 @@ def transform_data_with_patron_notes(raw_data):
     transformed['notificationEmail'] = ''
     transformed['notificationTextPhone'] = ''
 
-    # Other fields
+    # Patron notes, custom fields, etc.
     transformed['patronNotes'] = raw_data['Student Home Institution Name'].fillna('')
-
-    # Photo URL Mapping
     photo_url_mapping = {
         'ALC': 'https://mannix.org.au/images/ALC.png',
         'CTC': 'https://mannix.org.au/images/CTC.png',
@@ -97,7 +96,6 @@ def transform_data_with_patron_notes(raw_data):
         'https://mannix.org.au/images/UD.png'
     )
 
-    # Custom fields
     transformed['customdata1'] = raw_data['Course Level'].fillna('')
     transformed['customdata2'] = raw_data['Course Name'].fillna('')
     transformed['customdata3'] = raw_data['Course Type'].fillna('')
@@ -108,21 +106,60 @@ def transform_data_with_patron_notes(raw_data):
     transformed['illPatronType'] = ''
     transformed['illPickupLocation'] = ''
 
-    # Reordering the fields
+    # Reordering the fields to match the required OCLC tab-delimited spec (46 columns total)
     field_order = [
-        "prefix", "givenName", "middleName", "familyName", "suffix", "nickname", "canSelfEdit", "dateOfBirth", "gender",
-        "institutionId", "barcode", "idAtSource", "sourceSystem", "borrowerCategory", "circRegistrationDate", "oclcExpirationDate", "homeBranch",
-        "primaryStreetAddressLine1", "primaryStreetAddressLine2", "primaryCityOrLocality", "primaryStateOrProvince", "primaryPostalCode",
-        "primaryCountry", "primaryPhone", "secondaryStreetAddressLine1", "secondaryStreetAddressLine2", "secondaryCityOrLocality",
-        "secondaryStateOrProvince", "secondaryPostalCode", "secondaryCountry", "secondaryPhone", "emailAddress", "mobilePhone",
-        "notificationEmail", "notificationTextPhone", "patronNotes", "photoURL", "customdata1", "customdata2", "customdata3",
-        "customdata4", "username", "illId", "illApprovalStatus", "illPatronType", "illPickupLocation"
+        "prefix",                     # 1
+        "givenName",                  # 2
+        "middleName",                # 3
+        "familyName",                # 4
+        "suffix",                    # 5
+        "nickname",                  # 6
+        "canSelfEdit",               # 7
+        "dateOfBirth",               # 8
+        "gender",                    # 9
+        "institutionId",             # 10
+        "barcode",                   # 11
+        "idAtSource",                # 12
+        "sourceSystem",              # 13
+        "borrowerCategory",          # 14
+        "circRegistrationDate",      # 15
+        "oclcExpirationDate",        # 16
+        "homeBranch",                # 17
+        "primaryStreetAddressLine1", # 18
+        "primaryStreetAddressLine2", # 19
+        "primaryCityOrLocality",     # 20
+        "primaryStateOrProvince",    # 21
+        "primaryPostalCode",         # 22
+        "primaryCountry",            # 23
+        "primaryPhone",              # 24
+        "secondaryStreetAddressLine1",#25
+        "secondaryStreetAddressLine2",#26
+        "secondaryCityOrLocality",   # 27
+        "secondaryStateOrProvince",  # 28
+        "secondaryPostalCode",       # 29
+        "secondaryCountry",          # 30
+        "secondaryPhone",            # 31
+        "emailAddress",              # 32
+        "mobilePhone",               # 33
+        "notificationEmail",         # 34
+        "notificationTextPhone",     # 35
+        "patronNotes",               # 36
+        "photoURL",                  # 37
+        "customdata1",               # 38
+        "customdata2",               # 39
+        "customdata3",               # 40
+        "customdata4",               # 41
+        "username",                  # 42
+        "illId",                     # 43
+        "illApprovalStatus",         # 44
+        "illPatronType",             # 45
+        "illPickupLocation"          # 46
     ]
 
-    # Ensure all fields in the order are present
+    # Ensure all fields are present in the DataFrame, even if empty
     for field in field_order:
         if field not in transformed.columns:
-            transformed[field] = ""  # Add blank column for unspecified fields
+            transformed[field] = ""
 
     return transformed[field_order]
 
@@ -136,7 +173,7 @@ def main():
 
     st.title("🎓 Student Enrollment Data Transformer")
     st.markdown("""
-    Upload your student enrollment CSV file, and we'll transform it into the required format.
+    Upload your student enrollment CSV file, and we'll transform it into the required tab-delimited format.
     """)
 
     # Sidebar for file upload
@@ -153,27 +190,36 @@ def main():
         else:
             st.info("Awaiting CSV file to be uploaded.")
 
+    # If there's a file, transform the data
     if uploaded_file is not None:
         with st.spinner("Transforming data..."):
             transformed_data = transform_data_with_patron_notes(raw_data)
         st.success("Data transformation complete!")
 
-        # Display raw data
+        # Preview raw data
         with st.expander("📄 Raw Data Preview"):
             st.dataframe(raw_data.head())
 
-        # Display transformed data
+        # Preview transformed data
         with st.expander("✅ Transformed Data Preview"):
             st.dataframe(transformed_data.head())
 
-        # Ensure date fields are strings (if any additional date fields are present)
-        date_fields = ['dateOfBirth', 'oclcExpirationDate']  # Add more if necessary
+        # Ensure date fields are strings
+        date_fields = ['dateOfBirth', 'oclcExpirationDate']
         for field in date_fields:
             if field in transformed_data.columns:
                 transformed_data[field] = transformed_data[field].astype(str)
 
-        # Provide download link as tab-delimited TXT
-        txt = transformed_data.to_csv(index=False, sep='\t', quoting=1, encoding='utf-8')
+        # Generate tab-delimited text file with no quotes
+        txt = transformed_data.to_csv(
+            index=False,
+            sep='\t',
+            quoting=csv.QUOTE_NONE,  # No quotes for any field
+            escapechar='\\',         # Escape special chars if needed
+            encoding='utf-8'
+        )
+
+        # Download button for the TXT file
         st.download_button(
             label="⬇️ Download Transformed Data (TXT)",
             data=txt,
@@ -181,7 +227,7 @@ def main():
             mime="text/plain"
         )
 
-        # Optional: Display entire transformed data
+        # Optional: View the entire transformed data
         with st.expander("🔍 View Entire Transformed Data"):
             st.dataframe(transformed_data)
 
