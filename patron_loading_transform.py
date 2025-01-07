@@ -110,50 +110,50 @@ def transform_data_with_patron_notes(raw_data):
     field_order = [
         "prefix",                     # 1
         "givenName",                  # 2
-        "middleName",                # 3
-        "familyName",                # 4
-        "suffix",                    # 5
-        "nickname",                  # 6
-        "canSelfEdit",               # 7
-        "dateOfBirth",               # 8
-        "gender",                    # 9
-        "institutionId",             # 10
-        "barcode",                   # 11
-        "idAtSource",                # 12
-        "sourceSystem",              # 13
-        "borrowerCategory",          # 14
-        "circRegistrationDate",      # 15
-        "oclcExpirationDate",        # 16
-        "homeBranch",                # 17
-        "primaryStreetAddressLine1", # 18
-        "primaryStreetAddressLine2", # 19
-        "primaryCityOrLocality",     # 20
-        "primaryStateOrProvince",    # 21
-        "primaryPostalCode",         # 22
-        "primaryCountry",            # 23
-        "primaryPhone",              # 24
-        "secondaryStreetAddressLine1",#25
-        "secondaryStreetAddressLine2",#26
-        "secondaryCityOrLocality",   # 27
-        "secondaryStateOrProvince",  # 28
-        "secondaryPostalCode",       # 29
-        "secondaryCountry",          # 30
-        "secondaryPhone",            # 31
-        "emailAddress",              # 32
-        "mobilePhone",               # 33
-        "notificationEmail",         # 34
-        "notificationTextPhone",     # 35
-        "patronNotes",               # 36
-        "photoURL",                  # 37
-        "customdata1",               # 38
-        "customdata2",               # 39
-        "customdata3",               # 40
-        "customdata4",               # 41
-        "username",                  # 42
-        "illId",                     # 43
-        "illApprovalStatus",         # 44
-        "illPatronType",             # 45
-        "illPickupLocation"          # 46
+        "middleName",                 # 3
+        "familyName",                 # 4
+        "suffix",                     # 5
+        "nickname",                   # 6
+        "canSelfEdit",                # 7
+        "dateOfBirth",                # 8
+        "gender",                     # 9
+        "institutionId",              # 10
+        "barcode",                    # 11
+        "idAtSource",                 # 12
+        "sourceSystem",               # 13
+        "borrowerCategory",           # 14
+        "circRegistrationDate",       # 15
+        "oclcExpirationDate",         # 16
+        "homeBranch",                 # 17
+        "primaryStreetAddressLine1",  # 18
+        "primaryStreetAddressLine2",  # 19
+        "primaryCityOrLocality",      # 20
+        "primaryStateOrProvince",     # 21
+        "primaryPostalCode",          # 22
+        "primaryCountry",             # 23
+        "primaryPhone",               # 24
+        "secondaryStreetAddressLine1",# 25
+        "secondaryStreetAddressLine2",# 26
+        "secondaryCityOrLocality",    # 27
+        "secondaryStateOrProvince",   # 28
+        "secondaryPostalCode",        # 29
+        "secondaryCountry",           # 30
+        "secondaryPhone",             # 31
+        "emailAddress",               # 32
+        "mobilePhone",                # 33
+        "notificationEmail",          # 34
+        "notificationTextPhone",      # 35
+        "patronNotes",                # 36
+        "photoURL",                   # 37
+        "customdata1",                # 38
+        "customdata2",                # 39
+        "customdata3",                # 40
+        "customdata4",                # 41
+        "username",                   # 42
+        "illId",                      # 43
+        "illApprovalStatus",          # 44
+        "illPatronType",              # 45
+        "illPickupLocation"           # 46
     ]
 
     # Ensure all fields are present in the DataFrame, even if empty
@@ -210,21 +210,24 @@ def main():
             if field in transformed_data.columns:
                 transformed_data[field] = transformed_data[field].astype(str)
 
-        # Generate tab-delimited text file with no quotes
+        # Generate tab-delimited text as a Python string
         txt = transformed_data.to_csv(
             index=False,
             sep='\t',
             quoting=csv.QUOTE_NONE,  # No quotes for any field
-            escapechar='\\',         # Escape special chars if needed
-            encoding='utf-8'
+            escapechar='\\'          # Escape special chars if needed
+            # No encoding argument here—pandas returns a Python string
         )
 
-        # Download button for the TXT file
+        # Convert that string to Latin-1 bytes
+        txt_latin1 = txt.encode('latin-1', errors='replace')
+
+        # Download button for the TXT file in Latin-1 encoding
         st.download_button(
             label="⬇️ Download Transformed Data (TXT)",
-            data=txt,
+            data=txt_latin1,
             file_name="transformed_data.txt",
-            mime="text/plain"
+            mime="text/plain; charset=ISO-8859-1"
         )
 
         # Optional: View the entire transformed data
