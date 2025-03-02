@@ -54,9 +54,9 @@ FIELD_ORDER: List[str] = [
 
 # ---------------- Data Transformation ---------------- #
 
-def transform_data_with_patron_notes(raw_data: pd.DataFrame) -> pd.DataFrame:
+def transform_student_data(raw_data: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw CSV data into the desired tab-delimited format.
+    Transforms the raw CSV data into a tab-delimited format with the required fields.
     
     Parameters:
         raw_data (pd.DataFrame): Data loaded from the uploaded CSV file.
@@ -70,9 +70,10 @@ def transform_data_with_patron_notes(raw_data: pd.DataFrame) -> pd.DataFrame:
         st.error(f"Missing required columns: {', '.join(missing_columns)}")
         st.stop()
 
+    # Initialize an empty DataFrame for transformed data
     transformed = pd.DataFrame()
 
-    # Basic personal info and identifiers
+    # Personal and identifier details
     transformed['prefix'] = ""
     transformed['givenName'] = raw_data['First Name'].fillna("")
     transformed['middleName'] = raw_data['Middle Name'].fillna("")
@@ -87,17 +88,17 @@ def transform_data_with_patron_notes(raw_data: pd.DataFrame) -> pd.DataFrame:
     transformed['idAtSource'] = raw_data['Email'].fillna("")
     transformed['sourceSystem'] = "https://idp.divinity.edu.au/realms/divinity"
 
-    # Borrower Category mapping based on Course Type
+    # Borrower category based on Course Type
     transformed['borrowerCategory'] = raw_data['Course Type'].apply(
         lambda x: 'HDR Student' if isinstance(x, str) and x.strip().upper() == 'RESEARCH' else 'Student'
     )
     transformed['circRegistrationDate'] = ""
     transformed['oclcExpirationDate'] = "2025-12-31T00:00:00"
 
-    # Map home branch using the institution abbreviation
+    # Map home branch based on institution abbreviation
     transformed['homeBranch'] = raw_data['Student Home Institution Abbrev'].map(HOME_BRANCH_MAPPING).fillna("267183")
 
-    # Address information
+    # Primary address information
     transformed['primaryStreetAddressLine1'] = raw_data['Address1'].fillna("")
     transformed['primaryStreetAddressLine2'] = raw_data['Address2'].fillna("")
     transformed['primaryCityOrLocality'] = raw_data['City'].fillna("")
@@ -105,6 +106,8 @@ def transform_data_with_patron_notes(raw_data: pd.DataFrame) -> pd.DataFrame:
     transformed['primaryPostalCode'] = raw_data['Postal Code'].fillna("")
     transformed['primaryCountry'] = raw_data['Country'].fillna("")
     transformed['primaryPhone'] = raw_data['Home Phone'].fillna("")
+
+    # Secondary address and phone details
     transformed['secondaryStreetAddressLine1'] = ""
     transformed['secondaryStreetAddressLine2'] = ""
     transformed['secondaryCityOrLocality'] = ""
@@ -119,7 +122,7 @@ def transform_data_with_patron_notes(raw_data: pd.DataFrame) -> pd.DataFrame:
     transformed['notificationEmail'] = ""
     transformed['notificationTextPhone'] = ""
 
-    # Additional fields: Patron notes, photo, and custom data
+    # Additional details: Patron notes, photo URL, and custom data fields
     transformed['patronNotes'] = raw_data['Student Home Institution Name'].fillna("")
     transformed['photoURL'] = raw_data['Student Home Institution Abbrev'].map(PHOTO_URL_MAPPING).fillna(
         "https://mannix.org.au/images/UD.png"
@@ -134,12 +137,12 @@ def transform_data_with_patron_notes(raw_data: pd.DataFrame) -> pd.DataFrame:
     transformed['illPatronType'] = ""
     transformed['illPickupLocation'] = ""
 
-    # Ensure all fields exist, even if empty
+    # Ensure all fields exist even if some are missing
     for field in FIELD_ORDER:
         if field not in transformed.columns:
             transformed[field] = ""
 
-    # Reorder columns according to FIELD_ORDER
+    # Reorder the DataFrame columns according to the specified field order
     return transformed[FIELD_ORDER]
 
 # ---------------- Main App Function ---------------- #
@@ -160,7 +163,7 @@ def main() -> None:
         """
     )
 
-    # Sidebar file upload section
+    # Sidebar: File upload section
     with st.sidebar:
         st.header("Upload Data")
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
@@ -176,12 +179,12 @@ def main() -> None:
             st.info("Awaiting CSV file to be uploaded.")
             return
 
-    # Data transformation process
+    # Transform data with a progress spinner
     with st.spinner("Transforming data..."):
-        transformed_data = transform_data_with_patron_notes(raw_data)
+        transformed_data = transform_student_data(raw_data)
     st.success("Data transformation complete!")
 
-    # Data previews for user inspection
+    # Previews for user inspection
     with st.expander("📄 Raw Data Preview"):
         st.dataframe(raw_data.head())
 
@@ -193,18 +196,18 @@ def main() -> None:
         if field in transformed_data.columns:
             transformed_data[field] = transformed_data[field].astype(str)
 
-    # Generate a tab-delimited string from the transformed data
+    # Generate a tab-delimited string from the transformed DataFrame
     txt_data = transformed_data.to_csv(
         index=False,
         sep='\t',
-        quoting=csv.QUOTE_NONE,  # No quotes around fields
-        escapechar='\\'          # Escape special characters if necessary
+        quoting=csv.QUOTE_NONE,  # Do not add quotes around fields
+        escapechar='\\'          # Escape special characters if needed
     )
 
     # Encode the string to Latin-1 (ISO-8859-1)
     txt_bytes = txt_data.encode('latin-1', errors='replace')
 
-    # Download button for the transformed TXT file
+    # Provide a download button for the transformed TXT file
     st.download_button(
         label="⬇️ Download Transformed Data (TXT)",
         data=txt_bytes,
@@ -212,7 +215,7 @@ def main() -> None:
         mime="text/plain; charset=ISO-8859-1"
     )
 
-    # Optionally show the entire transformed dataset
+    # Optionally display the entire transformed dataset
     with st.expander("🔍 View Entire Transformed Data"):
         st.dataframe(transformed_data)
 
