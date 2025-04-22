@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import csv
-from io import StringIO
+import re
 from typing import List
 
 # ---------------- Constants ---------------- #
@@ -37,7 +37,6 @@ PHOTO_URL_MAPPING = {
     'SGR': 'https://mannix.org.au/images/UD.png'
 }
 
-# Defines the final output order (46 fields)
 FIELD_ORDER: List[str] = [
     "prefix", "givenName", "middleName", "familyName", "suffix", "nickname",
     "canSelfEdit", "dateOfBirth", "gender", "institutionId", "barcode",
@@ -52,172 +51,148 @@ FIELD_ORDER: List[str] = [
     "username", "illId", "illApprovalStatus", "illPatronType", "illPickupLocation"
 ]
 
+EMAIL_REGEX = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
+
 # ---------------- Data Transformation ---------------- #
 
-def transform_student_data(raw_data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transforms the raw CSV data into a tab-delimited format with the required fields.
-    
-    Parameters:
-        raw_data (pd.DataFrame): Data loaded from the uploaded CSV file.
-        
-    Returns:
-        pd.DataFrame: Transformed DataFrame with columns in the required order.
-    """
-    # Validate required columns
-    missing_columns = [col for col in REQUIRED_COLUMNS if col not in raw_data.columns]
-    if missing_columns:
-        st.error(f"Missing required columns: {', '.join(missing_columns)}")
+@st.cache_data(show_spinner=False)
+def transform_student_data(raw_data: pd.DataFrame, expiration_date: str) -> pd.DataFrame:
+    # -- Pre-cleaning --
+    df = raw_data.fillna('').astype(str).applymap(lambda x: x.strip())
+
+    # -- Validate columns --
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        st.error(f"Missing columns: {', '.join(missing)}")
         st.stop()
 
-    # Initialize an empty DataFrame for transformed data
-    transformed = pd.DataFrame()
+    # -- Email sanity check --
+    bad_emails = df.loc[~df['Email'].apply(lambda e: bool(EMAIL_REGEX.match(e))), 'Email'].unique()
+    if len([e for e in bad_emails if e]) > 0:
+        st.warning(f"Invalid email formats spotted: {', '.join(bad_emails[:5])}…")
 
-    # Personal and identifier details
-    transformed['prefix'] = ""
-    transformed['givenName'] = raw_data['First Name'].fillna("")
-    transformed['middleName'] = raw_data['Middle Name'].fillna("")
-    transformed['familyName'] = raw_data['Last Name'].fillna("")
-    transformed['suffix'] = ""
-    transformed['nickname'] = raw_data['Nickname'].fillna("")
-    transformed['canSelfEdit'] = False
-    transformed['dateOfBirth'] = ""
-    transformed['gender'] = ""
-    transformed['institutionId'] = "134059"
-    transformed['barcode'] = raw_data['Student Number'].fillna("")
-    transformed['idAtSource'] = raw_data['Email'].fillna("")
-    transformed['sourceSystem'] = "https://idp.divinity.edu.au/realms/divinity"
+    # -- Branch mapping check --
+    abbrs = df['Student Home Institution Abbrev'].unique()
+    unmapped = set(abbrs) - HOME_BRANCH_MAPPING.keys()
+    if unmapped:
+        st.warning(f"Unmapped branches: {', '.join(unmapped)}; using default.")
 
-    # Borrower category based on Course Type
-    transformed['borrowerCategory'] = raw_data['Course Type'].apply(
-        lambda x: 'HDR Student' if isinstance(x, str) and x.strip().upper() == 'RESEARCH' else 'Student'
-    )
-    transformed['circRegistrationDate'] = ""
-    transformed['oclcExpirationDate'] = "2025-12-31T00:00:00"
+    # -- Build transformed --
+    T = pd.DataFrame({
+        'prefix': "",
+        'givenName': df['First Name'],
+        'middleName': df['Middle Name'],
+        'familyName': df['Last Name'],
+        'suffix': "",
+        'nickname': df['Nickname'],
+        'canSelfEdit': False,
+        'dateOfBirth': "",
+        'gender': "",
+        'institutionId': "134059",
+        'barcode': df['Student Number'],
+        'idAtSource': df['Email'],
+        'sourceSystem': "https://idp.divinity.edu.au/realms/divinity",
+        'borrowerCategory': df['Course Type'].apply(
+            lambda x: 'HDR Student' if x.upper()=='RESEARCH' else 'Student'
+        ),
+        'circRegistrationDate': "",
+        'oclcExpirationDate': expiration_date,
+        'homeBranch': df['Student Home Institution Abbrev']
+                       .map(HOME_BRANCH_MAPPING)
+                       .fillna(HOME_BRANCH_MAPPING.get('UD')),
+        'primaryStreetAddressLine1': df['Address1'],
+        'primaryStreetAddressLine2': df['Address2'],
+        'primaryCityOrLocality': df['City'],
+        'primaryStateOrProvince': df['State'],
+        'primaryPostalCode': df['Postal Code'],
+        'primaryCountry': df['Country'],
+        'primaryPhone': df['Home Phone'],
+        'secondaryStreetAddressLine1': "",
+        'secondaryStreetAddressLine2': "",
+        'secondaryCityOrLocality': "",
+        'secondaryStateOrProvince': "",
+        'secondaryPostalCode': "",
+        'secondaryCountry': "",
+        'secondaryPhone': df['Work Phone'],
+        'emailAddress': df['Email'],
+        'mobilePhone': df['Mobile Phone'],
+        'notificationEmail': "",
+        'notificationTextPhone': "",
+        'patronNotes': df['Student Home Institution Name'],
+        'photoURL': df['Student Home Institution Abbrev']
+                   .map(PHOTO_URL_MAPPING)
+                   .fillna(PHOTO_URL_MAPPING.get('UD')),
+        'customdata1': df['Course Level'],
+        'customdata2': df['Course Name'],
+        'customdata3': df['Course Type'],
+        'customdata4': "",
+        'username': df['Email'],
+        'illId': "",
+        'illApprovalStatus': "",
+        'illPatronType': "",
+        'illPickupLocation': ""
+    })
 
-    # Map home branch based on institution abbreviation
-    transformed['homeBranch'] = raw_data['Student Home Institution Abbrev'].map(HOME_BRANCH_MAPPING).fillna("267183")
+    # -- Guarantee all fields and order --
+    for f in FIELD_ORDER:
+        if f not in T.columns:
+            T[f] = ""
+    return T[FIELD_ORDER]
 
-    # Primary address information
-    transformed['primaryStreetAddressLine1'] = raw_data['Address1'].fillna("")
-    transformed['primaryStreetAddressLine2'] = raw_data['Address2'].fillna("")
-    transformed['primaryCityOrLocality'] = raw_data['City'].fillna("")
-    transformed['primaryStateOrProvince'] = raw_data['State'].fillna("")
-    transformed['primaryPostalCode'] = raw_data['Postal Code'].fillna("")
-    transformed['primaryCountry'] = raw_data['Country'].fillna("")
-    transformed['primaryPhone'] = raw_data['Home Phone'].fillna("")
+# ---------------- Main App ---------------- #
 
-    # Secondary address and phone details
-    transformed['secondaryStreetAddressLine1'] = ""
-    transformed['secondaryStreetAddressLine2'] = ""
-    transformed['secondaryCityOrLocality'] = ""
-    transformed['secondaryStateOrProvince'] = ""
-    transformed['secondaryPostalCode'] = ""
-    transformed['secondaryCountry'] = ""
-    transformed['secondaryPhone'] = raw_data['Work Phone'].fillna("")
-
-    # Contact details
-    transformed['emailAddress'] = raw_data['Email'].fillna("")
-    transformed['mobilePhone'] = raw_data['Mobile Phone'].fillna("")
-    transformed['notificationEmail'] = ""
-    transformed['notificationTextPhone'] = ""
-
-    # Additional details: Patron notes, photo URL, and custom data fields
-    transformed['patronNotes'] = raw_data['Student Home Institution Name'].fillna("")
-    transformed['photoURL'] = raw_data['Student Home Institution Abbrev'].map(PHOTO_URL_MAPPING).fillna(
-        "https://mannix.org.au/images/UD.png"
-    )
-    transformed['customdata1'] = raw_data['Course Level'].fillna("")
-    transformed['customdata2'] = raw_data['Course Name'].fillna("")
-    transformed['customdata3'] = raw_data['Course Type'].fillna("")
-    transformed['customdata4'] = ""
-    transformed['username'] = raw_data['Email'].fillna("")
-    transformed['illId'] = ""
-    transformed['illApprovalStatus'] = ""
-    transformed['illPatronType'] = ""
-    transformed['illPickupLocation'] = ""
-
-    # Ensure all fields exist even if some are missing
-    for field in FIELD_ORDER:
-        if field not in transformed.columns:
-            transformed[field] = ""
-
-    # Reorder the DataFrame columns according to the specified field order
-    return transformed[FIELD_ORDER]
-
-# ---------------- Main App Function ---------------- #
-
-def main() -> None:
-    st.set_page_config(
-        page_title="Student Enrollment Data Transformer",
-        page_icon="🎓",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-
+def main():
+    st.set_page_config(page_title="🎓 Student Enrollment Transformer", layout="wide")
     st.title("🎓 Student Enrollment Data Transformer")
-    st.markdown(
-        """
-        Upload your student enrollment CSV file below, and the app will transform it into a tab-delimited format 
-        that meets the required specification.
-        """
-    )
+    st.markdown("Upload a CSV, dance in the rain, and get tab‑delimited magic.")
 
-    # Sidebar: File upload section
+    # -- Sidebar --
     with st.sidebar:
-        st.header("Upload Data")
-        uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+        st.header("Upload & Settings")
+        uploaded = st.file_uploader("Choose CSV", type="csv")
+        exp_date = st.date_input(
+            "Expiration Date",
+            value=pd.to_datetime("2025-12-31")
+        ).strftime("%Y-%m-%dT00:00:00")
 
-        if uploaded_file is not None:
-            try:
-                raw_data = pd.read_csv(uploaded_file)
-                st.success("File uploaded successfully!")
-            except Exception as e:
-                st.error(f"Error reading CSV file: {e}")
-                st.stop()
-        else:
-            st.info("Awaiting CSV file to be uploaded.")
-            return
+    if not uploaded:
+        st.info("Waiting on that CSV…")
+        return
 
-    # Transform data with a progress spinner
-    with st.spinner("Transforming data..."):
-        transformed_data = transform_student_data(raw_data)
-    st.success("Data transformation complete!")
+    try:
+        raw = pd.read_csv(uploaded, dtype=str)
+        st.success("CSV loaded!")
+    except Exception as e:
+        st.error(f"Couldn’t read CSV: {e}")
+        return
 
-    # Previews for user inspection
-    with st.expander("📄 Raw Data Preview"):
-        st.dataframe(raw_data.head())
+    with st.spinner("Transforming…"):
+        out = transform_student_data(raw, exp_date)
+    st.success("Done. Feast your eyes below!")
 
-    with st.expander("✅ Transformed Data Preview"):
-        st.dataframe(transformed_data.head())
+    # -- Previews --
+    with st.expander("🔍 Raw Preview"):
+        st.dataframe(raw.head())
+    with st.expander("✅ Transformed Preview"):
+        st.dataframe(out.head())
 
-    # Ensure date fields are treated as strings
-    for field in ['dateOfBirth', 'oclcExpirationDate']:
-        if field in transformed_data.columns:
-            transformed_data[field] = transformed_data[field].astype(str)
+    # -- Force strings on key dates --
+    for d in ['dateOfBirth','oclcExpirationDate']:
+        if d in out:
+            out[d] = out[d].astype(str)
 
-    # Generate a tab-delimited string from the transformed DataFrame
-    txt_data = transformed_data.to_csv(
-        index=False,
-        sep='\t',
-        quoting=csv.QUOTE_NONE,  # Do not add quotes around fields
-        escapechar='\\'          # Escape special characters if needed
-    )
-
-    # Encode the string to Latin-1 (ISO-8859-1)
-    txt_bytes = txt_data.encode('latin-1', errors='replace')
-
-    # Provide a download button for the transformed TXT file
-    st.download_button(
-        label="⬇️ Download Transformed Data (TXT)",
-        data=txt_bytes,
+    # -- Download button --
+    txt = out.to_csv(index=False, sep='\t', quoting=csv.QUOTE_NONE, escapechar='\\')
+    btn = st.download_button(
+        "⬇️ Download TXT",
+        data=txt.encode('latin-1', errors='replace'),
         file_name="transformed_data.txt",
         mime="text/plain; charset=ISO-8859-1"
     )
 
-    # Optionally display the entire transformed dataset
-    with st.expander("🔍 View Entire Transformed Data"):
-        st.dataframe(transformed_data)
+    # -- Full data if you dare --
+    with st.expander("🗂️ Full Transformed"):
+        st.dataframe(out)
 
 if __name__ == "__main__":
     main()
