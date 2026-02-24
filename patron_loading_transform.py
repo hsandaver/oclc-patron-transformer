@@ -21,6 +21,30 @@ FILTER_COLUMNS: List[str] = [
     'Course Status Id',
     'Enrolment Status Id'
 ]
+TRANSFER_MATCH_KEYS: List[str] = ['Student Number', 'Email']
+PRIMARY_IMPORT_DEFAULTS = {
+    'Person Status Id': 'PERSON_ACTIVE',
+    'Course Status Id': 'PROGRAM_ACTIVE',
+    'Enrolment Status Id': 'ENROLMENT_ENROLLED',
+    'Student Home Institution Name': 'University of Divinity',
+    'Student Home Institution Abbrev': 'UD'
+}
+INSTITUTION_ABBREV_BY_NAME = {
+    'Australian Lutheran College': 'ALC',
+    'Catholic Theological College': 'CTC',
+    'Eva Burrows College': 'EBC',
+    'School of Graduate Research': 'SGR',
+    'St Athanasius College': 'SAC',
+    'St Barnabas College': 'SBC',
+    'St Francis College': 'SFC',
+    'Uniting College for Leadership and Theology': 'UCLT',
+    'University of Divinity': 'UD',
+    'Whitley College': 'WHT',
+    'Wollaston Theological College': 'WTC',
+    'Yarra Theological Union': 'YTU',
+    'Pilgrim Theological College': 'PIL',
+    'Trinity College Theological School': 'TRI'
+}
 
 ALLOWED_PERSON_STATUS = {'PERSON_ACTIVE'}
 ALLOWED_COURSE_STATUS = {'PROGRAM_ACTIVE'}
@@ -225,6 +249,149 @@ def apply_filters(raw_data: pd.DataFrame, allowed_institutions: Tuple[str, ...])
     return df[mask].copy()
 
 @st.cache_data(show_spinner=False)
+def prepare_primary_import_rows(import_data: pd.DataFrame) -> Tuple[pd.DataFrame, int, int]:
+    if import_data.empty:
+        return import_data.copy(), 0, 0
+
+    prepared = import_data.copy()
+    prepared.columns = [str(column).strip() for column in prepared.columns]
+
+    # Support both source CSV headers and patron-template XLSX headers.
+    alias_map = {
+        'First Name': ['First', 'givenName'],
+        'Middle Name': ['middleName'],
+        'Last Name': ['Last', 'Surname', 'familyName'],
+        'Nickname': ['nickname'],
+        'Student Number': ['barcode'],
+        'Email': ['emailAddress', 'username', 'idAtSource'],
+        'Address1': ['primaryStreetAddressLine1'],
+        'Address2': ['primaryStreetAddressLine2'],
+        'City': ['primaryCityOrLocality'],
+        'State': ['primaryStateOrProvince'],
+        'Postal Code': ['primaryPostalCode'],
+        'Country': ['primaryCountry'],
+        'Home Phone': ['primaryPhone'],
+        'Work Phone': ['secondaryPhone'],
+        'Mobile Phone': ['mobilePhone'],
+        'Course Level': ['customdata1'],
+        'Course Name': ['customdata2'],
+        'Course Type': ['customdata3'],
+        'Student Home Institution Name': ['patronNotes']
+    }
+
+    for target_column, alias_columns in alias_map.items():
+        if target_column not in prepared.columns:
+            prepared[target_column] = ''
+        for alias_column in alias_columns:
+            if alias_column in prepared.columns:
+                alias_series = prepared[alias_column].fillna('').astype(str).str.strip()
+                target_series = prepared[target_column].fillna('').astype(str).str.strip()
+                fill_mask = target_series.eq('') & alias_series.ne('')
+                if fill_mask.any():
+                    prepared.loc[fill_mask, target_column] = alias_series[fill_mask]
+
+    required_for_import = set(REQUIRED_COLUMNS + FILTER_COLUMNS)
+    for column in required_for_import:
+        if column not in prepared.columns:
+            prepared[column] = ''
+        prepared[column] = prepared[column].fillna('').astype(str).str.strip()
+
+    for column, default_value in PRIMARY_IMPORT_DEFAULTS.items():
+        prepared[column] = prepared[column].where(prepared[column].ne(''), default_value)
+
+    abbrev_missing = prepared['Student Home Institution Abbrev'].eq('')
+    mapped_abbrev = prepared['Student Home Institution Name'].map(INSTITUTION_ABBREV_BY_NAME).fillna('')
+    prepared.loc[abbrev_missing, 'Student Home Institution Abbrev'] = mapped_abbrev[abbrev_missing]
+    prepared['Student Home Institution Abbrev'] = prepared['Student Home Institution Abbrev'].where(
+        prepared['Student Home Institution Abbrev'].ne(''),
+        PRIMARY_IMPORT_DEFAULTS['Student Home Institution Abbrev']
+    )
+
+    has_name = prepared['First Name'].ne('') | prepared['Last Name'].ne('')
+    prepared = prepared[has_name].copy()
+    source_name_rows = int(has_name.sum())
+    if prepared.empty:
+        return prepared, source_name_rows, 0
+
+    primary_rule_rows = apply_filters(prepared, ALLOWED_INSTITUTIONS_PRIMARY)
+    return primary_rule_rows, source_name_rows, len(primary_rule_rows)
+
+@st.cache_data(show_spinner=False)
+def build_primary_transfer_candidates(primary_data: pd.DataFrame) -> pd.DataFrame:
+    required_columns = ['First Name', 'Last Name', 'Student Number', 'Email']
+    missing = [column for column in required_columns if column not in primary_data.columns]
+    if missing:
+        st.warning(
+            "Manual transfer unavailable. Missing columns: "
+            f"{', '.join(sorted(missing))}"
+        )
+        return pd.DataFrame(columns=['__transfer_id', '__transfer_label'])
+
+    candidates = primary_data.copy()
+    for column in required_columns:
+        candidates[column] = candidates[column].fillna('').astype(str).str.strip()
+
+    has_student_number = candidates['Student Number'].ne('')
+    has_email = candidates['Email'].ne('')
+
+    candidates['__transfer_id'] = ''
+    candidates.loc[has_student_number, '__transfer_id'] = (
+        'SN::' + candidates.loc[has_student_number, 'Student Number']
+    )
+    candidates.loc[~has_student_number & has_email, '__transfer_id'] = (
+        'EM::' + candidates.loc[~has_student_number & has_email, 'Email']
+    )
+    no_key_mask = candidates['__transfer_id'].eq('')
+    candidates.loc[no_key_mask, '__transfer_id'] = (
+        'IX::' + candidates.loc[no_key_mask].index.astype(str)
+    )
+
+    candidates = candidates.drop_duplicates(subset=['__transfer_id'], keep='first').copy()
+    display_ref = candidates['Student Number'].where(
+        candidates['Student Number'].ne(''),
+        candidates['Email']
+    )
+    display_ref = display_ref.where(display_ref.ne(''), 'no id')
+    display_name = (candidates['First Name'] + ' ' + candidates['Last Name']).str.strip()
+    display_name = display_name.where(display_name.ne(''), 'Unnamed record')
+    candidates['__transfer_label'] = display_name + ' [' + display_ref + ']'
+
+    return candidates.sort_values(by=['Last Name', 'First Name', 'Student Number', 'Email'])
+
+def transfer_selected_primary_record(
+    selected_primary_row: pd.Series,
+    secondary_data: pd.DataFrame
+) -> Tuple[pd.DataFrame, int, str]:
+    secondary = secondary_data.copy()
+    source = selected_primary_row.copy()
+
+    for column in secondary.columns:
+        secondary[column] = secondary[column].fillna('').astype(str).str.strip()
+    source = source.fillna('').astype(str).str.strip()
+
+    match_mask = pd.Series(False, index=secondary.index)
+    for key_column in TRANSFER_MATCH_KEYS:
+        if key_column in secondary.columns and key_column in source.index:
+            key_value = source.get(key_column, '')
+            if key_value:
+                match_mask = match_mask | secondary[key_column].eq(key_value)
+
+    common_columns = [
+        column for column in secondary.columns
+        if column in source.index and not column.startswith('__')
+    ]
+
+    if match_mask.any():
+        secondary.loc[match_mask, common_columns] = source[common_columns].values
+        return secondary, int(match_mask.sum()), 'updated'
+
+    new_row = pd.DataFrame([
+        {column: source.get(column, '') for column in secondary.columns}
+    ])
+    secondary = pd.concat([secondary, new_row], ignore_index=True)
+    return secondary, 1, 'added'
+
+@st.cache_data(show_spinner=False)
 def transform_student_data(raw_data: pd.DataFrame, expiration_date: str) -> pd.DataFrame:
     # -- Pre-cleaning --
     df = raw_data.fillna('').astype(str)
@@ -336,11 +503,20 @@ def main():
     with st.sidebar:
         st.header("Upload and Settings")
         uploaded = st.file_uploader("Choose CSV file", type="csv")
+        uploaded_primary_names = st.file_uploader(
+            "Optional: add names to primary (XLSX)",
+            type=["xlsx"]
+        )
         exp_date = st.date_input(
             "Expiration Date",
             value=DEFAULT_EXPIRATION_DATE
         ).strftime(EXPIRATION_DATE_FORMAT)
         st.caption("Output format: tab-delimited TXT encoded as ISO-8859-1.")
+        st.caption(
+            "XLSX import: rows are forced through primary rules "
+            "(active statuses + allowed primary institutions), "
+            "including patron-template headers such as givenName/familyName/barcode."
+        )
 
     if not uploaded:
         st.info("Waiting on that CSV...")
@@ -352,6 +528,15 @@ def main():
     except Exception as e:
         st.error(f"Couldn’t read CSV: {e}")
         return
+
+    primary_import_raw = pd.DataFrame()
+    if uploaded_primary_names is not None:
+        try:
+            primary_import_raw = pd.read_excel(uploaded_primary_names, dtype=str)
+            st.success(f"XLSX loaded: {uploaded_primary_names.name}")
+        except Exception as e:
+            st.error(f"Couldn’t read XLSX: {e}")
+            return
 
     st.markdown("<div class='section-title'>Filters</div>", unsafe_allow_html=True)
     st.markdown(
@@ -374,11 +559,84 @@ def main():
     with st.spinner("Applying filters…"):
         filtered_primary = apply_filters(raw, ALLOWED_INSTITUTIONS_PRIMARY)
         filtered_secondary = apply_filters(raw, ALLOWED_INSTITUTIONS_SECONDARY)
+
+    filtered_primary_base_count = len(filtered_primary)
+    primary_import_source_rows = 0
+    primary_import_applied_rows = 0
+    if not primary_import_raw.empty:
+        imported_primary_rows, primary_import_source_rows, primary_import_applied_rows = (
+            prepare_primary_import_rows(primary_import_raw)
+        )
+        if primary_import_applied_rows > 0:
+            merged_columns = list(filtered_primary.columns) + [
+                column for column in imported_primary_rows.columns
+                if column not in filtered_primary.columns
+            ]
+            filtered_primary = filtered_primary.reindex(columns=merged_columns, fill_value='')
+            imported_primary_rows = imported_primary_rows.reindex(columns=merged_columns, fill_value='')
+            filtered_primary = pd.concat(
+                [filtered_primary, imported_primary_rows],
+                ignore_index=True
+            )
+
     st.success(
         "Filters applied: "
-        f"{len(filtered_primary):,} primary rows, "
+        f"{filtered_primary_base_count:,} primary rows, "
         f"{len(filtered_secondary):,} secondary rows."
     )
+    if uploaded_primary_names is not None:
+        if primary_import_source_rows == 0:
+            st.warning("XLSX import had no rows with a first or last name.")
+        elif primary_import_applied_rows == 0:
+            st.warning("XLSX rows did not pass primary rules and were not added.")
+        else:
+            st.success(
+                f"Added {primary_import_applied_rows:,} row(s) from XLSX to primary data."
+            )
+            skipped_rows = primary_import_source_rows - primary_import_applied_rows
+            if skipped_rows > 0:
+                st.info(
+                    f"Skipped {skipped_rows:,} XLSX row(s) that did not pass primary rules."
+                )
+
+    st.markdown("<div class='section-title'>Manual transfer</div>", unsafe_allow_html=True)
+    transfer_candidates = build_primary_transfer_candidates(filtered_primary)
+    transfer_labels = dict(
+        zip(transfer_candidates['__transfer_id'], transfer_candidates['__transfer_label'])
+    )
+    selected_transfer_id = st.selectbox(
+        "Choose one name from primary data to copy into secondary data",
+        options=[""] + transfer_candidates['__transfer_id'].tolist(),
+        format_func=lambda transfer_id: (
+            "No manual transfer"
+            if transfer_id == ""
+            else transfer_labels.get(transfer_id, transfer_id)
+        ),
+        help=(
+            "This copies one primary record into secondary data before transformation. "
+            "Secondary output rules (institutionId, borrowerCategory, homeBranch) still apply."
+        )
+    )
+
+    transferred_name_rows = 0
+    selected_transfer_label = ""
+    transfer_action = "none"
+    if selected_transfer_id:
+        selected_primary_row = transfer_candidates[
+            transfer_candidates['__transfer_id'].eq(selected_transfer_id)
+        ].iloc[0]
+        filtered_secondary, transferred_name_rows, transfer_action = transfer_selected_primary_record(
+            selected_primary_row,
+            filtered_secondary
+        )
+        selected_transfer_label = transfer_labels.get(selected_transfer_id, selected_transfer_id)
+        if transfer_action == 'added':
+            st.info(f"Added to secondary data: {selected_transfer_label}")
+        else:
+            st.info(
+                f"Updated {transferred_name_rows} secondary row(s) from primary data: "
+                f"{selected_transfer_label}"
+            )
 
     dl_cols = st.columns(2, gap="large")
     with dl_cols[0]:
@@ -408,11 +666,15 @@ def main():
         unsafe_allow_html=True
     )
 
-    stat_cols = st.columns(4, gap="large")
+    stat_cols = st.columns(6, gap="large")
     stat_cols[0].metric("Raw rows", f"{len(raw):,}")
     stat_cols[1].metric("Primary rows", f"{len(filtered_primary):,}")
     stat_cols[2].metric("Secondary rows", f"{len(filtered_secondary):,}")
     stat_cols[3].metric("Expiration", exp_date.split("T")[0])
+    stat_cols[4].metric("Primary XLSX rows", f"{primary_import_applied_rows:,}")
+    stat_cols[5].metric("Manual transfer rows", f"{transferred_name_rows:,}")
+    if selected_transfer_label:
+        st.caption(f"Transfer source: {selected_transfer_label}")
 
     st.markdown("<div class='section-title'>Export</div>", unsafe_allow_html=True)
 
