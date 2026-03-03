@@ -111,6 +111,7 @@ DEFAULT_EXPIRATION_DATE = date(2026, 12, 31)
 EXPIRATION_DATE_FORMAT = "%Y-%m-%dT00:00:00"
 DEFAULT_HOME_BRANCH = HOME_BRANCH_MAPPING.get('UD', '')
 DEFAULT_PHOTO_URL = PHOTO_URL_MAPPING.get('UD', '')
+DEFAULT_SECONDARY_INSTITUTION = 'Pilgrim Theological College'
 APP_CSS = """
 <style>
 :root {
@@ -391,6 +392,66 @@ def transfer_selected_primary_record(
     secondary = pd.concat([secondary, new_row], ignore_index=True)
     return secondary, 1, 'added'
 
+def parse_manual_name(value: str) -> Tuple[str, str, str]:
+    cleaned = re.sub(r"\s+", " ", str(value).strip())
+    if not cleaned:
+        return '', '', ''
+
+    if ',' in cleaned:
+        last_name, remaining = cleaned.split(',', 1)
+        name_parts = remaining.strip().split()
+        first_name = name_parts[0] if name_parts else ''
+        middle_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ''
+        return first_name, middle_name, last_name.strip()
+
+    name_parts = cleaned.split()
+    if len(name_parts) == 1:
+        return name_parts[0], '', ''
+    if len(name_parts) == 2:
+        return name_parts[0], '', name_parts[1]
+
+    return name_parts[0], " ".join(name_parts[1:-1]), name_parts[-1]
+
+def build_manual_name_rows(
+    names_text: str,
+    target: str,
+    output_columns: List[str]
+) -> Tuple[pd.DataFrame, int, int]:
+    lines = [line.strip() for line in str(names_text).splitlines() if line.strip()]
+    if not lines:
+        return pd.DataFrame(columns=output_columns), 0, 0
+
+    rows = []
+    skipped = 0
+    for raw_line in lines:
+        first_name, middle_name, last_name = parse_manual_name(raw_line)
+        if not first_name and not last_name:
+            skipped += 1
+            continue
+
+        row = {column: '' for column in output_columns}
+        row.update({
+            'First Name': first_name,
+            'Middle Name': middle_name,
+            'Last Name': last_name,
+            'Person Status Id': PRIMARY_IMPORT_DEFAULTS['Person Status Id'],
+            'Course Status Id': PRIMARY_IMPORT_DEFAULTS['Course Status Id'],
+            'Enrolment Status Id': PRIMARY_IMPORT_DEFAULTS['Enrolment Status Id'],
+            'Student Home Institution Name': (
+                PRIMARY_IMPORT_DEFAULTS['Student Home Institution Name']
+                if target == 'primary'
+                else DEFAULT_SECONDARY_INSTITUTION
+            ),
+            'Student Home Institution Abbrev': (
+                PRIMARY_IMPORT_DEFAULTS['Student Home Institution Abbrev']
+                if target == 'primary'
+                else INSTITUTION_ABBREV_BY_NAME.get(DEFAULT_SECONDARY_INSTITUTION, 'PIL')
+            )
+        })
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=output_columns), len(rows), skipped
+
 @st.cache_data(show_spinner=False)
 def transform_student_data(raw_data: pd.DataFrame, expiration_date: str) -> pd.DataFrame:
     # -- Pre-cleaning --
@@ -599,6 +660,49 @@ def main():
                     f"Skipped {skipped_rows:,} XLSX row(s) that did not pass primary rules."
                 )
 
+    st.markdown("<div class='section-title'>Manual names</div>", unsafe_allow_html=True)
+    st.caption(
+        "Type one name per line. Supported formats: `First Last`, `First Middle Last`, or `Last, First`."
+    )
+    manual_name_cols = st.columns(2, gap="large")
+    with manual_name_cols[0]:
+        manual_primary_names = st.text_area(
+            "Add names to primary data",
+            placeholder="Jane Smith\nTaylor, Jordan"
+        )
+    with manual_name_cols[1]:
+        manual_secondary_names = st.text_area(
+            "Add names to secondary data",
+            placeholder="Alex Lee\nMorgan, Casey"
+        )
+
+    manual_primary_rows, manual_primary_added, manual_primary_skipped = build_manual_name_rows(
+        manual_primary_names,
+        'primary',
+        filtered_primary.columns.tolist()
+    )
+    if manual_primary_added > 0:
+        filtered_primary = pd.concat([filtered_primary, manual_primary_rows], ignore_index=True)
+
+    manual_secondary_rows, manual_secondary_added, manual_secondary_skipped = build_manual_name_rows(
+        manual_secondary_names,
+        'secondary',
+        filtered_secondary.columns.tolist()
+    )
+    if manual_secondary_added > 0:
+        filtered_secondary = pd.concat([filtered_secondary, manual_secondary_rows], ignore_index=True)
+
+    manual_names_added = manual_primary_added + manual_secondary_added
+    if manual_names_added > 0:
+        st.success(
+            "Added manual name rows: "
+            f"{manual_primary_added:,} primary, {manual_secondary_added:,} secondary."
+        )
+
+    skipped_manual_names = manual_primary_skipped + manual_secondary_skipped
+    if skipped_manual_names > 0:
+        st.warning(f"Skipped {skipped_manual_names:,} manual name line(s) that could not be parsed.")
+
     st.markdown("<div class='section-title'>Manual transfer</div>", unsafe_allow_html=True)
     transfer_candidates = build_primary_transfer_candidates(filtered_primary)
     transfer_labels = dict(
@@ -666,13 +770,14 @@ def main():
         unsafe_allow_html=True
     )
 
-    stat_cols = st.columns(6, gap="large")
+    stat_cols = st.columns(7, gap="large")
     stat_cols[0].metric("Raw rows", f"{len(raw):,}")
     stat_cols[1].metric("Primary rows", f"{len(filtered_primary):,}")
     stat_cols[2].metric("Secondary rows", f"{len(filtered_secondary):,}")
     stat_cols[3].metric("Expiration", exp_date.split("T")[0])
     stat_cols[4].metric("Primary XLSX rows", f"{primary_import_applied_rows:,}")
-    stat_cols[5].metric("Manual transfer rows", f"{transferred_name_rows:,}")
+    stat_cols[5].metric("Manual names added", f"{manual_names_added:,}")
+    stat_cols[6].metric("Manual transfer rows", f"{transferred_name_rows:,}")
     if selected_transfer_label:
         st.caption(f"Transfer source: {selected_transfer_label}")
 
