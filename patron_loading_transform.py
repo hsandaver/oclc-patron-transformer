@@ -29,6 +29,12 @@ PRIMARY_IMPORT_DEFAULTS = {
     'Student Home Institution Name': 'University of Divinity',
     'Student Home Institution Abbrev': 'UD'
 }
+SECONDARY_IMPORT_DEFAULTS = {
+    'Person Status Id': 'PERSON_ACTIVE',
+    'Course Status Id': 'PROGRAM_ACTIVE',
+    'Enrolment Status Id': 'ENROLMENT_ENROLLED',
+    'Student Home Institution Name': 'Pilgrim Theological College'
+}
 INSTITUTION_ABBREV_BY_NAME = {
     'Australian Lutheran College': 'ALC',
     'Catholic Theological College': 'CTC',
@@ -112,6 +118,10 @@ EXPIRATION_DATE_FORMAT = "%Y-%m-%dT00:00:00"
 DEFAULT_HOME_BRANCH = HOME_BRANCH_MAPPING.get('UD', '')
 DEFAULT_PHOTO_URL = PHOTO_URL_MAPPING.get('UD', '')
 DEFAULT_SECONDARY_INSTITUTION = 'Pilgrim Theological College'
+DEFAULT_SECONDARY_ABBREV = INSTITUTION_ABBREV_BY_NAME.get(DEFAULT_SECONDARY_INSTITUTION, 'PIL')
+
+CSV_ROLE_STANDARD = "Standard report (split primary + secondary)"
+CSV_ROLE_SECONDARY_ONLY = "Secondary import only (Pilgrim/Trinity audit)"
 APP_CSS = """
 <style>
 :root {
@@ -248,6 +258,49 @@ def apply_filters(raw_data: pd.DataFrame, allowed_institutions: Tuple[str, ...])
         & df['Enrolment Status Id'].isin(ALLOWED_ENROLMENT_STATUS)
     )
     return df[mask].copy()
+
+def build_empty_source_frame() -> pd.DataFrame:
+    base_columns = list(dict.fromkeys(REQUIRED_COLUMNS + FILTER_COLUMNS))
+    return pd.DataFrame(columns=base_columns)
+
+def normalize_secondary_institution_name(value: str) -> str:
+    cleaned = str(value).strip()
+    if not cleaned:
+        return DEFAULT_SECONDARY_INSTITUTION
+
+    lowered = re.sub(r"\s+", " ", cleaned).lower()
+    alias_map = {
+        'pilgrim': 'Pilgrim Theological College',
+        'pilgrim theological college': 'Pilgrim Theological College',
+        'pilgrim theological': 'Pilgrim Theological College',
+        'trinity': 'Trinity College Theological School',
+        'trinity college theological school': 'Trinity College Theological School',
+        'trinity theological school': 'Trinity College Theological School',
+        'tri': 'Trinity College Theological School',
+        'pil': 'Pilgrim Theological College'
+    }
+    if lowered in alias_map:
+        return alias_map[lowered]
+    if 'pilgrim' in lowered:
+        return 'Pilgrim Theological College'
+    if 'trinity' in lowered:
+        return 'Trinity College Theological School'
+    return cleaned
+
+def canonicalize_status_id(value: str, target_status: str) -> str:
+    cleaned = str(value).strip()
+    if not cleaned:
+        return target_status
+
+    normalized = re.sub(r"[^a-z0-9]+", "_", cleaned.lower()).strip('_')
+    aliases = {
+        'PERSON_ACTIVE': {'person_active', 'active', 'current'},
+        'PROGRAM_ACTIVE': {'program_active', 'course_active', 'active', 'current'},
+        'ENROLMENT_ENROLLED': {'enrolment_enrolled', 'enrollment_enrolled', 'enrolled', 'active', 'current'}
+    }
+    if cleaned == target_status or normalized in aliases.get(target_status, set()):
+        return target_status
+    return cleaned
 
 @st.cache_data(show_spinner=False)
 def prepare_primary_import_rows(import_data: pd.DataFrame) -> Tuple[pd.DataFrame, int, int]:
@@ -412,6 +465,101 @@ def parse_manual_name(value: str) -> Tuple[str, str, str]:
 
     return name_parts[0], " ".join(name_parts[1:-1]), name_parts[-1]
 
+@st.cache_data(show_spinner=False)
+def prepare_secondary_import_rows(import_data: pd.DataFrame) -> Tuple[pd.DataFrame, int, int]:
+    if import_data.empty:
+        return import_data.copy(), 0, 0
+
+    prepared = import_data.copy()
+    prepared.columns = [str(column).strip() for column in prepared.columns]
+
+    alias_map = {
+        'First Name': ['First', 'givenName'],
+        'Middle Name': ['Middle', 'middleName'],
+        'Last Name': ['Last', 'Surname', 'familyName'],
+        'Student Number': ['Barcode', 'barcode'],
+        'Email': ['emailAddress', 'username', 'idAtSource'],
+        'Course Name': ['Course', 'customdata2'],
+        'Course Type': ['Course Type', 'customdata3'],
+        'Student Home Institution Name': ['Home College', 'College', 'patronNotes'],
+        'Person Status Id': ['Person Status Id', 'personStatus'],
+        'Course Status Id': ['Course Status Id', 'courseStatus'],
+        'Enrolment Status Id': ['Enrolment status', 'Enrollment status', 'Enrolment Status Id']
+    }
+
+    for target_column, alias_columns in alias_map.items():
+        if target_column not in prepared.columns:
+            prepared[target_column] = ''
+        for alias_column in alias_columns:
+            if alias_column in prepared.columns:
+                alias_series = prepared[alias_column].fillna('').astype(str).str.strip()
+                target_series = prepared[target_column].fillna('').astype(str).str.strip()
+                fill_mask = target_series.eq('') & alias_series.ne('')
+                if fill_mask.any():
+                    prepared.loc[fill_mask, target_column] = alias_series[fill_mask]
+
+    if 'Name' in prepared.columns:
+        parsed = prepared['Name'].fillna('').astype(str).apply(parse_manual_name)
+        name_parts = pd.DataFrame(
+            parsed.tolist(),
+            columns=['__first_name', '__middle_name', '__last_name'],
+            index=prepared.index
+        )
+        for target_column, source_column in [
+            ('First Name', '__first_name'),
+            ('Middle Name', '__middle_name'),
+            ('Last Name', '__last_name')
+        ]:
+            target_series = prepared[target_column].fillna('').astype(str).str.strip()
+            source_series = name_parts[source_column].fillna('').astype(str).str.strip()
+            fill_mask = target_series.eq('') & source_series.ne('')
+            if fill_mask.any():
+                prepared.loc[fill_mask, target_column] = source_series[fill_mask]
+
+    required_for_import = set(REQUIRED_COLUMNS + FILTER_COLUMNS)
+    for column in required_for_import:
+        if column not in prepared.columns:
+            prepared[column] = ''
+        prepared[column] = prepared[column].fillna('').astype(str).str.strip()
+
+    prepared['Student Home Institution Name'] = prepared['Student Home Institution Name'].apply(
+        normalize_secondary_institution_name
+    )
+    for column, default_value in SECONDARY_IMPORT_DEFAULTS.items():
+        prepared[column] = prepared[column].where(prepared[column].ne(''), default_value)
+
+    prepared['Person Status Id'] = prepared['Person Status Id'].apply(
+        lambda value: canonicalize_status_id(value, SECONDARY_IMPORT_DEFAULTS['Person Status Id'])
+    )
+    prepared['Course Status Id'] = prepared['Course Status Id'].apply(
+        lambda value: canonicalize_status_id(value, SECONDARY_IMPORT_DEFAULTS['Course Status Id'])
+    )
+    prepared['Enrolment Status Id'] = prepared['Enrolment Status Id'].apply(
+        lambda value: canonicalize_status_id(value, SECONDARY_IMPORT_DEFAULTS['Enrolment Status Id'])
+    )
+
+    abbrev_missing = prepared['Student Home Institution Abbrev'].eq('')
+    mapped_abbrev = prepared['Student Home Institution Name'].map(INSTITUTION_ABBREV_BY_NAME).fillna('')
+    prepared.loc[abbrev_missing, 'Student Home Institution Abbrev'] = mapped_abbrev[abbrev_missing]
+    prepared['Student Home Institution Abbrev'] = prepared['Student Home Institution Abbrev'].where(
+        prepared['Student Home Institution Abbrev'].ne(''),
+        DEFAULT_SECONDARY_ABBREV
+    )
+
+    has_identity = (
+        prepared['First Name'].ne('')
+        | prepared['Last Name'].ne('')
+        | prepared['Student Number'].ne('')
+        | prepared['Email'].ne('')
+    )
+    prepared = prepared[has_identity].copy()
+    source_rows = int(has_identity.sum())
+    if prepared.empty:
+        return prepared, source_rows, 0
+
+    secondary_rule_rows = apply_filters(prepared, ALLOWED_INSTITUTIONS_SECONDARY)
+    return secondary_rule_rows, source_rows, len(secondary_rule_rows)
+
 def build_manual_name_rows(
     names_text: str,
     target: str,
@@ -564,20 +712,33 @@ def main():
     with st.sidebar:
         st.header("Upload and Settings")
         uploaded = st.file_uploader("Choose CSV file", type="csv")
-        uploaded_primary_names = st.file_uploader(
-            "Optional: add names to primary (XLSX)",
-            type=["xlsx"]
+        csv_role = st.radio(
+            "CSV role",
+            options=[CSV_ROLE_STANDARD, CSV_ROLE_SECONDARY_ONLY],
+            index=0
         )
+        uploaded_primary_names = None
+        if csv_role == CSV_ROLE_STANDARD:
+            uploaded_primary_names = st.file_uploader(
+                "Optional: add names to primary (XLSX)",
+                type=["xlsx"]
+            )
         exp_date = st.date_input(
             "Expiration Date",
             value=DEFAULT_EXPIRATION_DATE
         ).strftime(EXPIRATION_DATE_FORMAT)
         st.caption("Output format: tab-delimited TXT encoded as ISO-8859-1.")
-        st.caption(
-            "XLSX import: rows are forced through primary rules "
-            "(active statuses + allowed primary institutions), "
-            "including patron-template headers such as givenName/familyName/barcode."
-        )
+        if csv_role == CSV_ROLE_STANDARD:
+            st.caption(
+                "XLSX import: rows are forced through primary rules "
+                "(active statuses + allowed primary institutions), "
+                "including patron-template headers such as givenName/familyName/barcode."
+            )
+        else:
+            st.caption(
+                "Secondary import mode: supports audit headers such as "
+                "Barcode/Name/Course/Home College/Email/Enrolment status."
+            )
 
     if not uploaded:
         st.info("Waiting on that CSV...")
@@ -617,35 +778,48 @@ def main():
             "\n".join(f"- {name}" for name in sorted(ALLOWED_INSTITUTIONS_SECONDARY))
         )
 
-    with st.spinner("Applying filters…"):
-        filtered_primary = apply_filters(raw, ALLOWED_INSTITUTIONS_PRIMARY)
-        filtered_secondary = apply_filters(raw, ALLOWED_INSTITUTIONS_SECONDARY)
-
-    filtered_primary_base_count = len(filtered_primary)
+    filtered_primary_base_count = 0
     primary_import_source_rows = 0
     primary_import_applied_rows = 0
-    if not primary_import_raw.empty:
-        imported_primary_rows, primary_import_source_rows, primary_import_applied_rows = (
-            prepare_primary_import_rows(primary_import_raw)
-        )
-        if primary_import_applied_rows > 0:
-            merged_columns = list(filtered_primary.columns) + [
-                column for column in imported_primary_rows.columns
-                if column not in filtered_primary.columns
-            ]
-            filtered_primary = filtered_primary.reindex(columns=merged_columns, fill_value='')
-            imported_primary_rows = imported_primary_rows.reindex(columns=merged_columns, fill_value='')
-            filtered_primary = pd.concat(
-                [filtered_primary, imported_primary_rows],
-                ignore_index=True
+    secondary_import_source_rows = 0
+    secondary_import_applied_rows = 0
+
+    if csv_role == CSV_ROLE_STANDARD:
+        with st.spinner("Applying filters…"):
+            filtered_primary = apply_filters(raw, ALLOWED_INSTITUTIONS_PRIMARY)
+            filtered_secondary = apply_filters(raw, ALLOWED_INSTITUTIONS_SECONDARY)
+
+        filtered_primary_base_count = len(filtered_primary)
+        if not primary_import_raw.empty:
+            imported_primary_rows, primary_import_source_rows, primary_import_applied_rows = (
+                prepare_primary_import_rows(primary_import_raw)
             )
+            if primary_import_applied_rows > 0:
+                merged_columns = list(filtered_primary.columns) + [
+                    column for column in imported_primary_rows.columns
+                    if column not in filtered_primary.columns
+                ]
+                filtered_primary = filtered_primary.reindex(columns=merged_columns, fill_value='')
+                imported_primary_rows = imported_primary_rows.reindex(columns=merged_columns, fill_value='')
+                filtered_primary = pd.concat(
+                    [filtered_primary, imported_primary_rows],
+                    ignore_index=True
+                )
+    else:
+        with st.spinner("Preparing secondary import…"):
+            filtered_primary = build_empty_source_frame()
+            filtered_secondary, secondary_import_source_rows, secondary_import_applied_rows = (
+                prepare_secondary_import_rows(raw)
+            )
+            if not filtered_secondary.empty:
+                filtered_primary = filtered_primary.reindex(columns=filtered_secondary.columns, fill_value='')
 
     st.success(
         "Filters applied: "
         f"{filtered_primary_base_count:,} primary rows, "
         f"{len(filtered_secondary):,} secondary rows."
     )
-    if uploaded_primary_names is not None:
+    if csv_role == CSV_ROLE_STANDARD and uploaded_primary_names is not None:
         if primary_import_source_rows == 0:
             st.warning("XLSX import had no rows with a first or last name.")
         elif primary_import_applied_rows == 0:
@@ -658,6 +832,20 @@ def main():
             if skipped_rows > 0:
                 st.info(
                     f"Skipped {skipped_rows:,} XLSX row(s) that did not pass primary rules."
+                )
+    if csv_role == CSV_ROLE_SECONDARY_ONLY:
+        if secondary_import_source_rows == 0:
+            st.warning("Secondary CSV import had no rows with name, student number, or email.")
+        elif secondary_import_applied_rows == 0:
+            st.warning("Secondary CSV rows did not pass secondary rules and were not added.")
+        else:
+            st.success(
+                f"Added {secondary_import_applied_rows:,} row(s) from CSV to secondary data."
+            )
+            skipped_rows = secondary_import_source_rows - secondary_import_applied_rows
+            if skipped_rows > 0:
+                st.info(
+                    f"Skipped {skipped_rows:,} secondary CSV row(s) that did not pass secondary rules."
                 )
 
     st.markdown("<div class='section-title'>Manual names</div>", unsafe_allow_html=True)
@@ -771,11 +959,16 @@ def main():
     )
 
     stat_cols = st.columns(7, gap="large")
+    import_metric_label = "Primary XLSX rows"
+    import_metric_value = primary_import_applied_rows
+    if csv_role == CSV_ROLE_SECONDARY_ONLY:
+        import_metric_label = "Secondary import rows"
+        import_metric_value = secondary_import_applied_rows
     stat_cols[0].metric("Raw rows", f"{len(raw):,}")
     stat_cols[1].metric("Primary rows", f"{len(filtered_primary):,}")
     stat_cols[2].metric("Secondary rows", f"{len(filtered_secondary):,}")
     stat_cols[3].metric("Expiration", exp_date.split("T")[0])
-    stat_cols[4].metric("Primary XLSX rows", f"{primary_import_applied_rows:,}")
+    stat_cols[4].metric(import_metric_label, f"{import_metric_value:,}")
     stat_cols[5].metric("Manual names added", f"{manual_names_added:,}")
     stat_cols[6].metric("Manual transfer rows", f"{transferred_name_rows:,}")
     if selected_transfer_label:
